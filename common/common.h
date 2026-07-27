@@ -227,6 +227,7 @@ struct gpt_params {
     std::string input_prefix         = ""; // string to prefix user inputs with                             // NOLINT
     std::string input_suffix         = ""; // string to suffix user inputs with                             // NOLINT
     std::string logdir               = ""; // directory in which to save YAML log files                     // NOLINT
+    std::string token_timing_file    = ""; // JSONL file for per-token timing (empty: disabled)              // NOLINT
     std::string lookup_cache_static  = ""; // path of static ngram cache file for lookup decoding           // NOLINT
     std::string lookup_cache_dynamic = ""; // path of dynamic ngram cache file for lookup decoding          // NOLINT
     std::string logits_file          = ""; // file for saving *all* logits                                  // NOLINT

@@ -1,11 +1,13 @@
 #include "arg.h"
 #include "common.h"
 #include "console.h"
+#include "json.hpp"
 #include "log.h"
 #include "sampling.h"
 #include "llama.h"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -523,6 +525,24 @@ int main(int argc, char ** argv) {
 
     std::vector<llama_token> embd;
 
+    const bool token_timing_enabled = my_rank == 0 && !params.token_timing_file.empty();
+    const size_t token_timing_prompt_tokens = embd_inp.size();
+    std::ofstream token_timing_file;
+    bool token_timing_started = false;
+    int64_t token_timing_start_us = 0;
+    int64_t token_timing_last_us = 0;
+    double token_timing_sum_itl_ms = 0.0;
+    double token_timing_ttft_ms = 0.0;
+    size_t token_timing_index = 0;
+
+    if (token_timing_enabled) {
+        token_timing_file.open(params.token_timing_file, std::ios::out | std::ios::trunc);
+        if (!token_timing_file.is_open()) {
+            LOG_ERR("%s: failed to open token timing file '%s'\n", __func__, params.token_timing_file.c_str());
+            return 1;
+        }
+    }
+
     // tokenized antiprompts
     std::vector<std::vector<llama_token>> antiprompt_ids;
 
@@ -559,6 +579,14 @@ int main(int argc, char ** argv) {
     }
 
     while ((n_remain != 0 && !is_antiprompt) || params.interactive) {
+        if (token_timing_enabled && !token_timing_started && !embd.empty()) {
+            token_timing_start_us = ggml_time_us();
+            token_timing_started = true;
+        }
+
+        bool sampled_token = false;
+        std::string sampled_token_str;
+
         // predict
         if (!embd.empty() || my_rank != 0) {
             // Note: (n_ctx - 4) here is to match the logic for commandline prompt handling via
@@ -701,6 +729,38 @@ int main(int argc, char ** argv) {
 
                 gpt_sampler_accept(smpl, id, /* accept_grammar= */ true);
 
+                if (token_timing_enabled) {
+                    sampled_token = true;
+                    sampled_token_str = llama_token_to_piece(ctx, id, params.special);
+
+                    const int64_t token_now_us = ggml_time_us();
+                    const double elapsed_ms = (token_now_us - token_timing_start_us) / 1000.0;
+                    const double itl_ms = token_timing_index == 0
+                        ? elapsed_ms
+                        : (token_now_us - token_timing_last_us) / 1000.0;
+                    const nlohmann::json event = {
+                        {"type", "token"},
+                        {"index", token_timing_index},
+                        {"id", id},
+                        {"piece", sampled_token_str},
+                        {"elapsed_ms", elapsed_ms},
+                        {"itl_ms", itl_ms},
+                    };
+
+                    token_timing_file << event.dump() << '\n' << std::flush;
+                    if (!token_timing_file) {
+                        LOG_ERR("%s: failed to write token timing file '%s'\n", __func__, params.token_timing_file.c_str());
+                        return 1;
+                    }
+
+                    if (token_timing_index == 0) {
+                        token_timing_ttft_ms = elapsed_ms;
+                    }
+                    token_timing_sum_itl_ms += itl_ms;
+                    token_timing_last_us = token_now_us;
+                    ++token_timing_index;
+                }
+
                 embd.push_back(id);
 
                 // echo this to console
@@ -731,7 +791,9 @@ int main(int argc, char ** argv) {
         if (my_rank == 0) {
             if (input_echo && display) {
                 for (auto id : embd) {
-                    const std::string token_str = llama_token_to_piece(ctx, id, params.special);
+                    const std::string token_str = sampled_token
+                        ? sampled_token_str
+                        : llama_token_to_piece(ctx, id, params.special);
 
                     // Console/Stream Output
                     LOG("%s", token_str.c_str());
@@ -938,6 +1000,26 @@ int main(int argc, char ** argv) {
         if (params.interactive && n_remain <= 0 && params.n_predict >= 0) {
             n_remain = params.n_predict;
             is_interacting = true;
+        }
+    }
+
+    if (token_timing_enabled) {
+        const int64_t token_timing_end_us = ggml_time_us();
+        const nlohmann::json summary = {
+            {"type", "summary"},
+            {"prompt_tokens", token_timing_prompt_tokens},
+            {"generated_tokens", token_timing_index},
+            {"ttft_ms", token_timing_ttft_ms},
+            {"total_generation_ms", token_timing_started
+                ? (token_timing_end_us - token_timing_start_us) / 1000.0 : 0.0},
+            {"average_itl_ms", token_timing_index == 0
+                ? 0.0 : token_timing_sum_itl_ms / token_timing_index},
+        };
+
+        token_timing_file << summary.dump() << '\n' << std::flush;
+        if (!token_timing_file) {
+            LOG_ERR("%s: failed to write token timing summary to '%s'\n", __func__, params.token_timing_file.c_str());
+            return 1;
         }
     }
 

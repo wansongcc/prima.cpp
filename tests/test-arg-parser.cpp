@@ -93,6 +93,14 @@ int main(void) {
     assert(params.n_predict == 6789);
     assert(params.n_batch == 9090);
 
+    gpt_params main_params;
+    argv = {"binary_name", "--token-timing-file", "token-timing.jsonl"};
+    assert(true == gpt_params_parse(argv.size(), list_str_to_char(argv).data(), main_params, LLAMA_EXAMPLE_MAIN));
+    assert(main_params.token_timing_file == "token-timing.jsonl");
+
+    gpt_params default_params;
+    assert(default_params.token_timing_file.empty());
+
     // --draft cannot be used outside llama-speculative
     argv = {"binary_name", "--draft", "123"};
     assert(true == gpt_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SPECULATIVE));
